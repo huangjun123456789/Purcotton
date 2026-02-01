@@ -10,7 +10,7 @@ RUN npm run build
 
 # 阶段2: 运行后端
 FROM python:3.12-slim
-WORKDIR /app
+WORKDIR /app/backend
 
 # 安装依赖
 COPY backend/requirements.txt ./
@@ -29,5 +29,5 @@ ENV DEBUG=false
 # 暴露端口
 EXPOSE 8000
 
-# 启动命令
+# 启动命令（直接运行，WORKDIR 已设置）
 CMD ["python", "main.py"]
