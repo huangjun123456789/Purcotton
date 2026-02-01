@@ -1,0 +1,21 @@
+# Nixpacks 构建配置（Railway 使用）
+# 文档: https://nixpacks.com/docs/configuration/file
+
+[phases.setup]
+nixPkgs = ["python312", "nodejs_20"]
+
+[phases.install]
+cmds = [
+    "cd frontend && npm ci",
+    "cd backend && pip install -r requirements.txt"
+]
+
+[phases.build]
+cmds = [
+    "cd frontend && npm run build",
+    "mkdir -p backend/static",
+    "cp -r frontend/dist/* backend/static/"
+]
+
+[start]
+cmd = "cd backend && python main.py"
