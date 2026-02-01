@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制后端代码
 COPY backend/ ./
 
+# 复制初始化数据库（包含仓库结构和热力值数据）
+COPY backend/warehouse_heatmap_init.db ./warehouse_heatmap.db
+
 # 从前端构建阶段复制静态文件
 COPY --from=frontend-builder /app/frontend/dist ./static
 
