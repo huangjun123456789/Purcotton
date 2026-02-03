@@ -32,8 +32,8 @@ Thumbs.db
 *.log
 logs/
 
-# 报告文件（可选保留）
-# backend/reports/
+# 报告文件（运行时生成）
+backend/reports/
 
 # 测试
 .coverage
