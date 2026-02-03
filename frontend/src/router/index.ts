@@ -86,11 +86,12 @@ router.beforeEach((to, from, next) => {
   
   const token = localStorage.getItem('access_token')
   const userInfo = localStorage.getItem('user_info')
-  const isLoggedIn = !!token && !!userInfo
+  const isGuest = localStorage.getItem('is_guest') === 'true'
+  const isLoggedIn = (!!token && !!userInfo) || isGuest
   
   // 不需要认证的页面
   if (to.meta.requiresAuth === false) {
-    // 已登录用户访问登录页，跳转到首页
+    // 已登录用户（包括访客）访问登录页，跳转到首页
     if (to.name === 'Login' && isLoggedIn) {
       next('/')
       return
@@ -107,6 +108,11 @@ router.beforeEach((to, from, next) => {
   
   // 需要管理员权限
   if (to.meta.requiresAdmin) {
+    // 访客不能访问管理员页面
+    if (isGuest) {
+      next('/')
+      return
+    }
     const user = JSON.parse(userInfo || '{}')
     if (user.role !== 'admin') {
       // 无权限，跳转到首页

@@ -36,12 +36,16 @@ api.interceptors.response.use(
   response => response.data,
   error => {
     console.error('API Error:', error)
-    // 401 未授权，清除 token 并跳转登录
+    // 401 未授权处理
     if (error.response?.status === 401) {
-      localStorage.removeItem(TOKEN_KEY)
-      // 避免在登录页循环跳转
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login'
+      const isGuest = localStorage.getItem('is_guest') === 'true'
+      // 访客模式下不跳转登录页（访客只访问公开API）
+      if (!isGuest) {
+        localStorage.removeItem(TOKEN_KEY)
+        // 避免在登录页循环跳转
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login'
+        }
       }
     }
     return Promise.reject(error)

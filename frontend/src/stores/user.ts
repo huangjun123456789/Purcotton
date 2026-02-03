@@ -6,25 +6,48 @@ import { authApi } from '@/api'
 // Token 存储 key
 const TOKEN_KEY = 'access_token'
 const USER_KEY = 'user_info'
+const GUEST_KEY = 'is_guest'
+
+// 访客用户信息
+const GUEST_USER: User = {
+  id: 0,
+  username: 'guest',
+  nickname: '访客用户',
+  role: 'user',
+  is_active: true,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString()
+}
 
 export const useUserStore = defineStore('user', () => {
   // 状态
   const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
   const user = ref<User | null>(JSON.parse(localStorage.getItem(USER_KEY) || 'null'))
   const loading = ref(false)
+  const isGuest = ref(localStorage.getItem(GUEST_KEY) === 'true')
 
   // 计算属性
-  const isLoggedIn = computed(() => !!token.value && !!user.value)
-  const isAdmin = computed(() => user.value?.role === 'admin')
+  const isLoggedIn = computed(() => (!!token.value && !!user.value) || isGuest.value)
+  const isAdmin = computed(() => !isGuest.value && user.value?.role === 'admin')
   const username = computed(() => user.value?.username || '')
-  const displayName = computed(() => user.value?.nickname || user.value?.username || '用户')
-  const userRole = computed(() => user.value?.role || 'user')
+  const displayName = computed(() => {
+    if (isGuest.value) return '访客用户'
+    return user.value?.nickname || user.value?.username || '用户'
+  })
+  const userRole = computed(() => {
+    if (isGuest.value) return 'user'
+    return user.value?.role || 'user'
+  })
 
-  // 登录
+  // 管理员登录
   const login = async (loginData: LoginRequest): Promise<boolean> => {
     loading.value = true
     try {
       const response = await authApi.login(loginData)
+      
+      // 清除访客状态
+      isGuest.value = false
+      localStorage.removeItem(GUEST_KEY)
       
       // 保存 token 和用户信息
       token.value = response.access_token
@@ -42,8 +65,31 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  // 访客模式登录（普通用户）
+  const loginAsGuest = () => {
+    // 清除之前的登录状态
+    token.value = null
+    localStorage.removeItem(TOKEN_KEY)
+    
+    // 设置访客状态
+    isGuest.value = true
+    user.value = { ...GUEST_USER }
+    
+    localStorage.setItem(GUEST_KEY, 'true')
+    localStorage.setItem(USER_KEY, JSON.stringify(GUEST_USER))
+  }
+
   // 退出登录
   const logout = async () => {
+    // 如果是访客模式，直接清除状态
+    if (isGuest.value) {
+      isGuest.value = false
+      user.value = null
+      localStorage.removeItem(GUEST_KEY)
+      localStorage.removeItem(USER_KEY)
+      return
+    }
+    
     try {
       await authApi.logout()
     } catch (error) {
@@ -52,13 +98,20 @@ export const useUserStore = defineStore('user', () => {
       // 无论请求是否成功，都清除本地状态
       token.value = null
       user.value = null
+      isGuest.value = false
       localStorage.removeItem(TOKEN_KEY)
       localStorage.removeItem(USER_KEY)
+      localStorage.removeItem(GUEST_KEY)
     }
   }
 
   // 获取当前用户信息
   const fetchCurrentUser = async (): Promise<User | null> => {
+    // 访客模式不需要获取用户信息
+    if (isGuest.value) {
+      return user.value
+    }
+    
     if (!token.value) return null
     
     loading.value = true
@@ -117,6 +170,7 @@ export const useUserStore = defineStore('user', () => {
     token,
     user,
     loading,
+    isGuest,
     // 计算属性
     isLoggedIn,
     isAdmin,
@@ -125,6 +179,7 @@ export const useUserStore = defineStore('user', () => {
     userRole,
     // 方法
     login,
+    loginAsGuest,
     logout,
     fetchCurrentUser,
     updateProfile,

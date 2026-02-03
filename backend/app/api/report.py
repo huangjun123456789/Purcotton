@@ -67,6 +67,11 @@ async def fetch_report_data(zone_id: Optional[int] = None):
                 .join(Aisle, Shelf.aisle_id == Aisle.id)
                 .where(Aisle.zone_id == zone_id)
             )).scalar() or 0
+            # 有热力数据的库位数
+            data['active_location_count'] = (await db.execute(
+                select(func.count(func.distinct(LocationHeatData.location_id)))
+                .where(LocationHeatData.location_id.in_(location_ids_query))
+            )).scalar() or 0
             data['heat_data_count'] = (await db.execute(
                 select(func.count(LocationHeatData.id))
                 .where(LocationHeatData.location_id.in_(location_ids_query))
@@ -78,6 +83,10 @@ async def fetch_report_data(zone_id: Optional[int] = None):
             data['aisle_count'] = (await db.execute(select(func.count(Aisle.id)))).scalar() or 0
             data['shelf_count'] = (await db.execute(select(func.count(Shelf.id)))).scalar() or 0
             data['location_count'] = (await db.execute(select(func.count(Location.id)))).scalar() or 0
+            # 有热力数据的库位数
+            data['active_location_count'] = (await db.execute(
+                select(func.count(func.distinct(LocationHeatData.location_id)))
+            )).scalar() or 0
             data['heat_data_count'] = (await db.execute(select(func.count(LocationHeatData.id)))).scalar() or 0
         
         # 仓库列表
@@ -173,61 +182,65 @@ async def fetch_report_data(zone_id: Optional[int] = None):
             {'heat_level': k, 'cnt': v} for k, v in distribution.items()
         ]
         
-        # TOP热门库位 - 筛选指定库区
+        # TOP热门库位 - 筛选指定库区（按库位分组去重）
         if zone_id:
             top_hot_result = await db.execute(
                 select(
                     Location.full_code,
-                    LocationHeatData.heat_value,
-                    LocationHeatData.pick_frequency,
-                    LocationHeatData.turnover_rate
+                    func.max(LocationHeatData.heat_value),
+                    func.sum(LocationHeatData.pick_frequency),
+                    func.avg(LocationHeatData.turnover_rate)
                 ).join(Location, LocationHeatData.location_id == Location.id)
                 .where(LocationHeatData.location_id.in_(location_ids_query))
-                .order_by(LocationHeatData.heat_value.desc())
+                .group_by(Location.id, Location.full_code)
+                .order_by(func.max(LocationHeatData.heat_value).desc())
                 .limit(20)
             )
         else:
             top_hot_result = await db.execute(
                 select(
                     Location.full_code,
-                    LocationHeatData.heat_value,
-                    LocationHeatData.pick_frequency,
-                    LocationHeatData.turnover_rate
+                    func.max(LocationHeatData.heat_value),
+                    func.sum(LocationHeatData.pick_frequency),
+                    func.avg(LocationHeatData.turnover_rate)
                 ).join(Location, LocationHeatData.location_id == Location.id)
-                .order_by(LocationHeatData.heat_value.desc())
+                .group_by(Location.id, Location.full_code)
+                .order_by(func.max(LocationHeatData.heat_value).desc())
                 .limit(20)
             )
         data['top_hot'] = [
-            {'full_code': r[0], 'heat_value': r[1], 'pick_frequency': r[2], 'turnover_rate': r[3]}
+            {'full_code': r[0], 'heat_value': r[1] or 0, 'pick_frequency': r[2] or 0, 'turnover_rate': r[3] or 0}
             for r in top_hot_result.fetchall()
         ]
         
-        # TOP冷门库位 - 筛选指定库区
+        # TOP冷门库位 - 筛选指定库区（按库位分组去重）
         if zone_id:
             top_cold_result = await db.execute(
                 select(
                     Location.full_code,
-                    LocationHeatData.heat_value,
-                    LocationHeatData.pick_frequency,
-                    LocationHeatData.turnover_rate
+                    func.min(LocationHeatData.heat_value),
+                    func.sum(LocationHeatData.pick_frequency),
+                    func.avg(LocationHeatData.turnover_rate)
                 ).join(Location, LocationHeatData.location_id == Location.id)
                 .where(LocationHeatData.location_id.in_(location_ids_query))
-                .order_by(LocationHeatData.heat_value.asc())
+                .group_by(Location.id, Location.full_code)
+                .order_by(func.min(LocationHeatData.heat_value).asc())
                 .limit(20)
             )
         else:
             top_cold_result = await db.execute(
                 select(
                     Location.full_code,
-                    LocationHeatData.heat_value,
-                    LocationHeatData.pick_frequency,
-                    LocationHeatData.turnover_rate
+                    func.min(LocationHeatData.heat_value),
+                    func.sum(LocationHeatData.pick_frequency),
+                    func.avg(LocationHeatData.turnover_rate)
                 ).join(Location, LocationHeatData.location_id == Location.id)
-                .order_by(LocationHeatData.heat_value.asc())
+                .group_by(Location.id, Location.full_code)
+                .order_by(func.min(LocationHeatData.heat_value).asc())
                 .limit(20)
             )
         data['top_cold'] = [
-            {'full_code': r[0], 'heat_value': r[1], 'pick_frequency': r[2], 'turnover_rate': r[3]}
+            {'full_code': r[0], 'heat_value': r[1] or 0, 'pick_frequency': r[2] or 0, 'turnover_rate': r[3] or 0}
             for r in top_cold_result.fetchall()
         ]
         
@@ -235,34 +248,38 @@ async def fetch_report_data(zone_id: Optional[int] = None):
         if zone_id:
             aisle_result = await db.execute(
                 select(
+                    Zone.code,
                     Aisle.code,
                     Aisle.name,
                     func.avg(LocationHeatData.heat_value),
                     func.sum(LocationHeatData.pick_frequency),
-                    func.count(Location.id)
-                ).join(Shelf, Aisle.id == Shelf.aisle_id)
+                    func.count(func.distinct(Location.id))  # 去重统计库位数
+                ).join(Zone, Aisle.zone_id == Zone.id)
+                .join(Shelf, Aisle.id == Shelf.aisle_id)
                 .join(Location, Shelf.id == Location.shelf_id)
                 .join(LocationHeatData, Location.id == LocationHeatData.location_id)
                 .where(Aisle.zone_id == zone_id)
-                .group_by(Aisle.id, Aisle.code, Aisle.name)
+                .group_by(Zone.code, Aisle.id, Aisle.code, Aisle.name)
                 .order_by(func.avg(LocationHeatData.heat_value).desc())
             )
         else:
             aisle_result = await db.execute(
                 select(
+                    Zone.code,
                     Aisle.code,
                     Aisle.name,
                     func.avg(LocationHeatData.heat_value),
                     func.sum(LocationHeatData.pick_frequency),
-                    func.count(Location.id)
-                ).join(Shelf, Aisle.id == Shelf.aisle_id)
+                    func.count(func.distinct(Location.id))  # 去重统计库位数
+                ).join(Zone, Aisle.zone_id == Zone.id)
+                .join(Shelf, Aisle.id == Shelf.aisle_id)
                 .join(Location, Shelf.id == Location.shelf_id)
                 .join(LocationHeatData, Location.id == LocationHeatData.location_id)
-                .group_by(Aisle.id, Aisle.code, Aisle.name)
+                .group_by(Zone.code, Aisle.id, Aisle.code, Aisle.name)
                 .order_by(func.avg(LocationHeatData.heat_value).desc())
             )
         data['aisle_analysis'] = [
-            {'code': r[0], 'name': r[1], 'avg_heat': r[2] or 0, 'total_freq': r[3] or 0, 'loc_cnt': r[4]}
+            {'zone_code': r[0], 'code': r[1], 'name': r[2], 'avg_heat': r[3] or 0, 'total_freq': r[4] or 0, 'loc_cnt': r[5]}
             for r in aisle_result.fetchall()
         ]
         
@@ -270,36 +287,40 @@ async def fetch_report_data(zone_id: Optional[int] = None):
         if zone_id:
             shelf_result = await db.execute(
                 select(
+                    Zone.code,
                     Aisle.code,
                     Shelf.code,
                     func.avg(LocationHeatData.heat_value),
                     func.sum(LocationHeatData.pick_frequency),
-                    func.count(Location.id)
-                ).join(Shelf, Aisle.id == Shelf.aisle_id)
+                    func.count(func.distinct(Location.id))  # 去重统计库位数
+                ).join(Zone, Aisle.zone_id == Zone.id)
+                .join(Shelf, Aisle.id == Shelf.aisle_id)
                 .join(Location, Shelf.id == Location.shelf_id)
                 .join(LocationHeatData, Location.id == LocationHeatData.location_id)
                 .where(Aisle.zone_id == zone_id)
-                .group_by(Aisle.code, Shelf.id, Shelf.code)
+                .group_by(Zone.code, Aisle.code, Shelf.id, Shelf.code)
                 .order_by(func.avg(LocationHeatData.heat_value).desc())
                 .limit(15)
             )
         else:
             shelf_result = await db.execute(
                 select(
+                    Zone.code,
                     Aisle.code,
                     Shelf.code,
                     func.avg(LocationHeatData.heat_value),
                     func.sum(LocationHeatData.pick_frequency),
-                    func.count(Location.id)
-                ).join(Shelf, Aisle.id == Shelf.aisle_id)
+                    func.count(func.distinct(Location.id))  # 去重统计库位数
+                ).join(Zone, Aisle.zone_id == Zone.id)
+                .join(Shelf, Aisle.id == Shelf.aisle_id)
                 .join(Location, Shelf.id == Location.shelf_id)
                 .join(LocationHeatData, Location.id == LocationHeatData.location_id)
-                .group_by(Aisle.code, Shelf.id, Shelf.code)
+                .group_by(Zone.code, Aisle.code, Shelf.id, Shelf.code)
                 .order_by(func.avg(LocationHeatData.heat_value).desc())
                 .limit(15)
             )
         data['shelf_analysis'] = [
-            {'aisle_code': r[0], 'shelf_code': r[1], 'avg_heat': r[2] or 0, 'total_freq': r[3] or 0, 'loc_cnt': r[4]}
+            {'zone_code': r[0], 'aisle_code': r[1], 'shelf_code': r[2], 'avg_heat': r[3] or 0, 'total_freq': r[4] or 0, 'loc_cnt': r[5]}
             for r in shelf_result.fetchall()
         ]
         
@@ -343,7 +364,7 @@ def generate_docx_report(data: dict, output_path: str) -> bool:
     doc.add_heading('一、数据概览', level=1)
     
     # 基础统计表格
-    table = doc.add_table(rows=7, cols=2)
+    table = doc.add_table(rows=8, cols=2)
     table.style = 'Table Grid'
     
     stats = [
@@ -353,6 +374,7 @@ def generate_docx_report(data: dict, output_path: str) -> bool:
         ('巷道总数', f"{data['aisle_count']} 条"),
         ('货架总数', f"{data['shelf_count']} 个"),
         ('库位总数', f"{data['location_count']} 个"),
+        ('有热力数据的库位', f"{data['active_location_count']} 个"),
         ('热力数据记录', f"{data['heat_data_count']} 条"),
     ]
     
@@ -416,7 +438,8 @@ def generate_docx_report(data: dict, output_path: str) -> bool:
             table.rows[0].cells[i].paragraphs[0].runs[0].bold = True
         
         for i, d in enumerate(aisle_data, 1):
-            table.rows[i].cells[0].text = d['code']
+            # 巷道名称加上库区前缀，格式：LP-01巷
+            table.rows[i].cells[0].text = f"{d['zone_code']}-{d['code']}"
             table.rows[i].cells[1].text = f"{d['avg_heat']:.2f}"
             table.rows[i].cells[2].text = str(int(d['total_freq']))
             table.rows[i].cells[3].text = str(d['loc_cnt'])
@@ -438,7 +461,8 @@ def generate_docx_report(data: dict, output_path: str) -> bool:
             table.rows[0].cells[i].paragraphs[0].runs[0].bold = True
         
         for i, d in enumerate(shelf_data, 1):
-            table.rows[i].cells[0].text = d['aisle_code']
+            # 巷道名称加上库区前缀，格式：LP-01巷
+            table.rows[i].cells[0].text = f"{d['zone_code']}-{d['aisle_code']}"
             table.rows[i].cells[1].text = d['shelf_code']
             table.rows[i].cells[2].text = f"{d['avg_heat']:.2f}"
             table.rows[i].cells[3].text = str(int(d['total_freq']))

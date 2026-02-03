@@ -14,20 +14,10 @@
           class="nav-menu"
           :ellipsis="false"
         >
-          <el-sub-menu index="/heatmap-group">
-            <template #title>
-              <el-icon><PictureFilled /></el-icon>
-              <span>库位分布</span>
-            </template>
-            <el-menu-item index="/heatmap">
-              <el-icon><Grid /></el-icon>
-              <span>2D 视图</span>
-            </el-menu-item>
-            <el-menu-item index="/heatmap3d">
-              <el-icon><Box /></el-icon>
-              <span>3D 视图</span>
-            </el-menu-item>
-          </el-sub-menu>
+          <el-menu-item index="/heatmap">
+            <el-icon><PictureFilled /></el-icon>
+            <span>库位分布</span>
+          </el-menu-item>
           <el-menu-item v-if="isAdmin" index="/warehouse">
             <el-icon><OfficeBuilding /></el-icon>
             <span>仓库管理</span>
@@ -51,19 +41,23 @@
           <span class="user-info">
             <el-avatar :size="32" icon="UserFilled" />
             <span class="username">{{ displayName }}</span>
-            <el-tag size="small" :type="isAdmin ? 'danger' : 'info'" class="role-tag">
-              {{ isAdmin ? '管理员' : '用户' }}
+            <el-tag size="small" :type="roleTagType" class="role-tag">
+              {{ roleTagText }}
             </el-tag>
           </span>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="settings">
+              <el-dropdown-item v-if="!isGuest" command="settings">
                 <el-icon><Setting /></el-icon>
                 个人设置
               </el-dropdown-item>
+              <el-dropdown-item v-if="isGuest" command="adminLogin">
+                <el-icon><Key /></el-icon>
+                管理员登录
+              </el-dropdown-item>
               <el-dropdown-item command="logout" divided>
                 <el-icon><SwitchButton /></el-icon>
-                退出登录
+                {{ isGuest ? '退出系统' : '退出登录' }}
               </el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -82,7 +76,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { User, Setting, SwitchButton, Grid, Box } from '@element-plus/icons-vue'
+import { User, Setting, SwitchButton, Grid, Box, Key } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
@@ -91,22 +85,43 @@ const userStore = useUserStore()
 
 const activeMenu = computed(() => route.path)
 const isAdmin = computed(() => userStore.isAdmin)
+const isGuest = computed(() => userStore.isGuest)
 const displayName = computed(() => userStore.displayName)
+
+// 角色标签类型
+const roleTagType = computed(() => {
+  if (isGuest.value) return 'success'
+  if (isAdmin.value) return 'danger'
+  return 'info'
+})
+
+// 角色标签文本
+const roleTagText = computed(() => {
+  if (isGuest.value) return '访客'
+  if (isAdmin.value) return '管理员'
+  return '用户'
+})
 
 const handleCommand = async (command: string) => {
   switch (command) {
     case 'settings':
       router.push('/settings')
       break
+    case 'adminLogin':
+      // 先退出访客模式，再跳转登录页
+      await userStore.logout()
+      router.push('/login')
+      break
     case 'logout':
       try {
-        await ElMessageBox.confirm('确定要退出登录吗？', '提示', {
+        const confirmText = isGuest.value ? '确定要退出系统吗？' : '确定要退出登录吗？'
+        await ElMessageBox.confirm(confirmText, '提示', {
           confirmButtonText: '确定',
           cancelButtonText: '取消',
           type: 'warning'
         })
         await userStore.logout()
-        ElMessage.success('已退出登录')
+        ElMessage.success(isGuest.value ? '已退出系统' : '已退出登录')
         router.push('/login')
       } catch (error) {
         // 用户取消

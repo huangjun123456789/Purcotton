@@ -125,7 +125,7 @@
     </div>
 
     <!-- 热力图主体 - 使用与画布相同的网格布局 -->
-    <div class="heatmap-content card" v-loading="loading">
+    <div class="heatmap-content card" ref="heatmapContentRef" v-loading="loading">
       <div class="canvas-layout" v-if="heatmapData" :style="canvasGridStyle">
         <!-- 渲染每个单元格 -->
         <template v-for="cell in layoutCells" :key="`${cell.gridX}-${cell.gridY}`">
@@ -255,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useHeatmapStore } from '@/stores/heatmap'
 import { warehouseApi, reportApi } from '@/api'
 import type { LocationHeatItem, ShelfHeatData, ShelfType, TimeRange } from '@/types'
@@ -380,10 +380,55 @@ const getShelfTypeColor = (type: ShelfType): string => {
 }
 
 // 网格单元格大小
-const MIN_CELL_WIDTH = 38 // 最小宽度，确保文字可见
-const MIN_CELL_HEIGHT = 24 // 最小高度
-const LABEL_HEIGHT = 14 // 底部标签高度
+const MIN_CELL_WIDTH = 24 // 最小宽度
+const MIN_CELL_HEIGHT = 16 // 最小高度
+const LABEL_HEIGHT = 12 // 底部标签高度
 const GAP_SIZE = 1 // 间隙
+
+// 容器引用
+const heatmapContentRef = ref<HTMLElement | null>(null)
+
+// 容器尺寸响应式变量
+const containerWidth = ref(0)
+const containerHeight = ref(0)
+
+// ResizeObserver 实例
+let resizeObserver: ResizeObserver | null = null
+
+// 更新容器尺寸
+const updateContainerSize = () => {
+  if (heatmapContentRef.value) {
+    containerWidth.value = heatmapContentRef.value.clientWidth
+    containerHeight.value = heatmapContentRef.value.clientHeight
+  } else {
+    // 回退到窗口尺寸估算
+    containerWidth.value = window.innerWidth - 60
+    containerHeight.value = window.innerHeight - 300
+  }
+}
+
+// 初始化 ResizeObserver
+const initResizeObserver = () => {
+  if (heatmapContentRef.value && !resizeObserver) {
+    resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        containerWidth.value = entry.contentRect.width
+        containerHeight.value = entry.contentRect.height
+      }
+    })
+    resizeObserver.observe(heatmapContentRef.value)
+  }
+}
+
+// 窗口 resize 处理（作为备用）
+let resizeTimer: ReturnType<typeof setTimeout> | null = null
+const handleWindowResize = () => {
+  // 防抖处理
+  if (resizeTimer) clearTimeout(resizeTimer)
+  resizeTimer = setTimeout(() => {
+    updateContainerSize()
+  }, 100)
+}
 
 // 计算货架的平均热力值
 const getShelfAvgHeat = (locations: any[]) => {
@@ -416,23 +461,31 @@ const getLayoutBounds = () => {
   return { minX, maxX, minY, maxY }
 }
 
-// 计算自适应的单元格尺寸（宽高分开计算）
+// 计算自适应的单元格尺寸（宽高分开计算，响应容器大小变化）
 const adaptiveCellDimensions = computed(() => {
+  // 响应式依赖容器尺寸
+  const availableWidth = containerWidth.value || (window.innerWidth - 60)
+  const availableHeight = containerHeight.value || (window.innerHeight - 300)
+  
   const { minX, maxX, minY, maxY } = getLayoutBounds()
   const cols = maxX - minX + 1
   const rows = maxY - minY + 1
   
-  // 获取容器可用尺寸
-  const containerWidth = window.innerWidth - 60
-  const containerHeight = window.innerHeight - 300
+  if (cols <= 0 || rows <= 0) {
+    return { width: MIN_CELL_WIDTH, height: MIN_CELL_HEIGHT }
+  }
   
-  // 分别计算宽度和高度
-  let cellWidth = Math.floor((containerWidth - (cols - 1) * GAP_SIZE - 20) / cols)
-  let cellHeight = Math.floor((containerHeight - (rows - 1) * GAP_SIZE - 20 - rows * LABEL_HEIGHT) / rows)
+  // 计算可用空间（减去内边距和间隙）
+  const usableWidth = availableWidth - 40 // 左右内边距
+  const usableHeight = availableHeight - 40 // 上下内边距
   
-  // 确保最小尺寸
-  cellWidth = Math.max(MIN_CELL_WIDTH, Math.min(60, cellWidth))
-  cellHeight = Math.max(MIN_CELL_HEIGHT, Math.min(45, cellHeight))
+  // 分别计算宽度和高度，使内容完全适应屏幕
+  let cellWidth = Math.floor((usableWidth - (cols - 1) * GAP_SIZE) / cols)
+  let cellHeight = Math.floor((usableHeight - (rows - 1) * GAP_SIZE - rows * LABEL_HEIGHT) / rows)
+  
+  // 确保最小尺寸，不设置最大尺寸限制以实现全屏自适应
+  cellWidth = Math.max(MIN_CELL_WIDTH, cellWidth)
+  cellHeight = Math.max(MIN_CELL_HEIGHT, cellHeight)
   
   return { width: cellWidth, height: cellHeight }
 })
@@ -742,6 +795,14 @@ const formatFileSize = (bytes: number): string => {
 
 // 初始化
 onMounted(async () => {
+  // 添加窗口 resize 事件监听
+  window.addEventListener('resize', handleWindowResize)
+  
+  // 初始化容器尺寸和 ResizeObserver
+  await nextTick()
+  updateContainerSize()
+  initResizeObserver()
+  
   // 先加载仓库列表
   try {
     warehouses.value = await warehouseApi.getWarehouses()
@@ -757,8 +818,22 @@ onMounted(async () => {
     }
     // 加载报告列表
     await loadReportList()
+    
+    // 数据加载后再次更新容器尺寸
+    await nextTick()
+    updateContainerSize()
   } catch (error) {
     console.error('初始化失败:', error)
+  }
+})
+
+// 清理
+onUnmounted(() => {
+  window.removeEventListener('resize', handleWindowResize)
+  if (resizeTimer) clearTimeout(resizeTimer)
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
   }
 })
 </script>
@@ -767,10 +842,13 @@ onMounted(async () => {
 .heatmap-page {
   padding: 20px;
   height: 100%;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .page-tabs {
+  flex-shrink: 0;
   margin-bottom: 15px;
   display: flex;
   align-items: center;
@@ -805,6 +883,7 @@ onMounted(async () => {
 }
 
 .filter-section {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -828,6 +907,7 @@ onMounted(async () => {
 }
 
 .heat-legend {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -850,13 +930,13 @@ onMounted(async () => {
 }
 
 .heatmap-content {
-  min-height: 300px;
-  max-height: calc(100vh - 260px);
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 5px;
+  padding: 10px;
 }
 
 .canvas-layout {
@@ -904,7 +984,7 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: bold;
   color: #333;
   cursor: pointer;
@@ -918,9 +998,9 @@ onMounted(async () => {
 
 .shelf-label {
   flex-shrink: 0;
-  height: 14px;
-  line-height: 14px;
-  font-size: 10px;
+  height: 12px;
+  line-height: 12px;
+  font-size: 9px;
   color: #fff;
   text-align: center;
   background: #409eff;
@@ -934,6 +1014,7 @@ onMounted(async () => {
 
 // 综合图例区域
 .combined-legend {
+  flex-shrink: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 20px;

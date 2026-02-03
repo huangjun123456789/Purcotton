@@ -13,6 +13,10 @@
       
       <div class="toolbar-center">
         <el-radio-group v-model="currentTool" size="default">
+          <el-radio-button value="select">
+            <el-icon><Select /></el-icon>
+            选择
+          </el-radio-button>
           <el-radio-button value="shelf">
             <el-icon><Grid /></el-icon>
             货架
@@ -227,11 +231,12 @@
           <!-- 画布网格 -->
           <div 
             class="canvas-grid"
+            ref="canvasGridRef"
             :style="gridStyle"
-            @mousedown="startDraw"
-            @mousemove="continueDraw"
-            @mouseup="stopDraw"
-            @mouseleave="stopDraw"
+            @mousedown="handleCanvasMouseDown"
+            @mousemove="handleCanvasMouseMove"
+            @mouseup="handleCanvasMouseUp"
+            @mouseleave="handleCanvasMouseLeave"
           >
             <div
               v-for="cell in displayCells"
@@ -245,6 +250,29 @@
               <span v-if="cell.type === 'shelf'" class="cell-label">{{ getShelfLabel(cell) }}</span>
               <span v-else-if="cell.type === 'aisle'" class="cell-label">A</span>
             </div>
+            
+            <!-- 框选矩形 -->
+            <div 
+              v-if="isSelecting" 
+              class="selection-box"
+              :style="selectionBoxStyle"
+            ></div>
+            
+            <!-- 拖拽预览 -->
+            <div 
+              v-for="preview in dragPreviewCells"
+              :key="`preview-${preview.x}-${preview.y}`"
+              class="drag-preview-cell"
+              :style="getDragPreviewStyle(preview)"
+            ></div>
+            
+            <!-- 粘贴预览 -->
+            <div 
+              v-for="preview in pastePreviewCells"
+              :key="`paste-${preview.x}-${preview.y}`"
+              class="paste-preview-cell"
+              :style="getPastePreviewStyle(preview)"
+            ></div>
           </div>
           
           <!-- 右侧按钮组 -->
@@ -327,9 +355,9 @@ const warehouse = ref<Warehouse | null>(null)
 const warehouseId = computed(() => Number(route.params.id))
 
 // 工具状态
-const currentTool = ref<'shelf' | 'aisle' | 'eraser'>('shelf')
+const currentTool = ref<'select' | 'shelf' | 'aisle' | 'eraser'>('shelf')
 const currentZoneIndex = ref(0) // 使用索引追踪选中的库区
-const showAllZones = ref(false)
+const showAllZones = ref(true) // 默认显示全部库区
 
 // 生成唯一ID
 const generateZoneId = () => `zone_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -348,8 +376,31 @@ const gridCols = ref(30)
 const actualRows = ref(20)
 const actualCols = ref(30)
 
-// 选中的单元格
+// 选中的单元格（单选）
 const selectedCell = ref<CanvasCell | null>(null)
+
+// 多选状态
+const selectedCells = ref<CanvasCell[]>([])  // 多选的单元格列表
+
+// 框选状态
+const isSelecting = ref(false)               // 是否正在框选
+const selectionStart = ref({ x: 0, y: 0 })   // 框选起点（相对于画布容器的像素坐标）
+const selectionEnd = ref({ x: 0, y: 0 })     // 框选终点（相对于画布容器的像素坐标）
+const canvasContainerRef = ref<HTMLElement | null>(null)  // 画布容器引用
+const canvasGridRef = ref<HTMLElement | null>(null)       // 画布网格引用
+
+// 剪贴板
+const clipboard = ref<CanvasCell[]>([])      // 复制的单元格数据
+const clipboardOffset = ref({ x: 0, y: 0 })  // 剪贴板基准偏移（选中区域的最小 x, y）
+const isCut = ref(false)                     // 是否是剪切操作
+
+// 拖拽移动状态
+const isDraggingSelection = ref(false)       // 是否正在拖拽移动选中区域
+const dragStartGrid = ref({ x: 0, y: 0 })    // 拖拽起点（网格坐标）
+const dragCurrentGrid = ref({ x: 0, y: 0 })  // 当前拖拽位置（网格坐标）
+
+// 粘贴预览位置
+const pastePreviewPos = ref<{ x: number, y: number } | null>(null)
 
 // 从 localStorage 读取上次的货架配置
 const getStoredShelfConfig = () => {
@@ -785,13 +836,499 @@ const stopDraw = () => {
   isDrawing.value = false
 }
 
+// ==================== 框选和拖拽相关 ====================
+
+// 单元格大小常量
+const CELL_SIZE = 28
+const CELL_GAP = 2
+const CELL_TOTAL = CELL_SIZE + CELL_GAP
+
+// 像素坐标转网格坐标
+const pixelToGrid = (px: number, py: number) => {
+  return {
+    x: Math.floor(px / CELL_TOTAL),
+    y: Math.floor(py / CELL_TOTAL)
+  }
+}
+
+// 网格坐标转像素坐标
+const gridToPixel = (gx: number, gy: number) => {
+  return {
+    x: gx * CELL_TOTAL,
+    y: gy * CELL_TOTAL
+  }
+}
+
+// 框选矩形样式
+const selectionBoxStyle = computed(() => {
+  const left = Math.min(selectionStart.value.x, selectionEnd.value.x)
+  const top = Math.min(selectionStart.value.y, selectionEnd.value.y)
+  const width = Math.abs(selectionEnd.value.x - selectionStart.value.x)
+  const height = Math.abs(selectionEnd.value.y - selectionStart.value.y)
+  
+  return {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    height: `${height}px`
+  }
+})
+
+// 拖拽预览单元格
+const dragPreviewCells = computed(() => {
+  if (!isDraggingSelection.value || selectedCells.value.length === 0) return []
+  
+  const offsetX = dragCurrentGrid.value.x - dragStartGrid.value.x
+  const offsetY = dragCurrentGrid.value.y - dragStartGrid.value.y
+  
+  return selectedCells.value.map(cell => ({
+    x: cell.x + offsetX,
+    y: cell.y + offsetY,
+    type: cell.type,
+    zoneId: cell.zoneId
+  }))
+})
+
+// 粘贴预览单元格
+const pastePreviewCells = computed(() => {
+  if (!pastePreviewPos.value || clipboard.value.length === 0) return []
+  
+  const offsetX = pastePreviewPos.value.x - clipboardOffset.value.x
+  const offsetY = pastePreviewPos.value.y - clipboardOffset.value.y
+  
+  return clipboard.value.map(cell => ({
+    x: cell.x + offsetX,
+    y: cell.y + offsetY,
+    type: cell.type,
+    zoneId: cell.zoneId
+  }))
+})
+
+// 获取拖拽预览样式
+const getDragPreviewStyle = (preview: { x: number, y: number, zoneId?: string }) => {
+  const zone = zones.value.find(z => z.id === preview.zoneId)
+  const color = zone?.color || '#409eff'
+  return {
+    left: `${preview.x * CELL_TOTAL + 2}px`,
+    top: `${preview.y * CELL_TOTAL + 2}px`,
+    width: `${CELL_SIZE}px`,
+    height: `${CELL_SIZE}px`,
+    backgroundColor: color
+  }
+}
+
+// 获取粘贴预览样式
+const getPastePreviewStyle = (preview: { x: number, y: number, zoneId?: string }) => {
+  const zone = zones.value.find(z => z.id === preview.zoneId)
+  const color = zone?.color || '#409eff'
+  return {
+    left: `${preview.x * CELL_TOTAL + 2}px`,
+    top: `${preview.y * CELL_TOTAL + 2}px`,
+    width: `${CELL_SIZE}px`,
+    height: `${CELL_SIZE}px`,
+    backgroundColor: color
+  }
+}
+
+// 检查点击是否在已选中区域内
+const isClickInSelectedArea = (x: number, y: number): boolean => {
+  return selectedCells.value.some(cell => cell.x === x && cell.y === y)
+}
+
+// 清除多选
+const clearMultiSelection = () => {
+  selectedCells.value = []
+  pastePreviewPos.value = null
+}
+
+// 统一的鼠标按下事件处理
+const handleCanvasMouseDown = (e: MouseEvent) => {
+  const target = e.target as HTMLElement
+  const rect = canvasGridRef.value?.getBoundingClientRect()
+  if (!rect) return
+  
+  const relativeX = e.clientX - rect.left
+  const relativeY = e.clientY - rect.top
+  const gridPos = pixelToGrid(relativeX, relativeY)
+  
+  // 选择工具模式
+  if (currentTool.value === 'select') {
+    // 检查是否点击在已选中区域内（开始拖拽移动）
+    if (isClickInSelectedArea(gridPos.x, gridPos.y)) {
+      isDraggingSelection.value = true
+      dragStartGrid.value = { x: gridPos.x, y: gridPos.y }
+      dragCurrentGrid.value = { x: gridPos.x, y: gridPos.y }
+      return
+    }
+    
+    // 否则开始框选
+    clearMultiSelection()
+    isSelecting.value = true
+    selectionStart.value = { x: relativeX, y: relativeY }
+    selectionEnd.value = { x: relativeX, y: relativeY }
+    return
+  }
+  
+  // 其他工具（货架、通道、橡皮擦）- 调用原有的绘制逻辑
+  startDraw(e)
+}
+
+// 统一的鼠标移动事件处理
+const handleCanvasMouseMove = (e: MouseEvent) => {
+  const rect = canvasGridRef.value?.getBoundingClientRect()
+  if (!rect) return
+  
+  const relativeX = e.clientX - rect.left
+  const relativeY = e.clientY - rect.top
+  const gridPos = pixelToGrid(relativeX, relativeY)
+  
+  // 框选中
+  if (isSelecting.value) {
+    selectionEnd.value = { x: relativeX, y: relativeY }
+    return
+  }
+  
+  // 拖拽移动中
+  if (isDraggingSelection.value) {
+    dragCurrentGrid.value = { x: gridPos.x, y: gridPos.y }
+    return
+  }
+  
+  // 如果有剪贴板内容，更新粘贴预览位置
+  if (currentTool.value === 'select' && clipboard.value.length > 0) {
+    pastePreviewPos.value = { x: gridPos.x, y: gridPos.y }
+  }
+  
+  // 其他工具的绘制逻辑
+  if (currentTool.value !== 'select') {
+    continueDraw(e)
+  }
+}
+
+// 统一的鼠标释放事件处理
+const handleCanvasMouseUp = (e: MouseEvent) => {
+  // 完成框选
+  if (isSelecting.value) {
+    finishSelection()
+    isSelecting.value = false
+    return
+  }
+  
+  // 完成拖拽移动
+  if (isDraggingSelection.value) {
+    finishDragMove()
+    isDraggingSelection.value = false
+    return
+  }
+  
+  // 其他工具
+  if (currentTool.value !== 'select') {
+    stopDraw()
+  }
+}
+
+// 鼠标离开画布
+const handleCanvasMouseLeave = () => {
+  if (isSelecting.value) {
+    finishSelection()
+    isSelecting.value = false
+  }
+  if (isDraggingSelection.value) {
+    // 取消拖拽，不执行移动
+    isDraggingSelection.value = false
+  }
+  if (currentTool.value !== 'select') {
+    stopDraw()
+  }
+}
+
+// 完成框选，计算选中的单元格
+const finishSelection = () => {
+  const startGrid = pixelToGrid(
+    Math.min(selectionStart.value.x, selectionEnd.value.x),
+    Math.min(selectionStart.value.y, selectionEnd.value.y)
+  )
+  const endGrid = pixelToGrid(
+    Math.max(selectionStart.value.x, selectionEnd.value.x),
+    Math.max(selectionStart.value.y, selectionEnd.value.y)
+  )
+  
+  // 找出框选范围内的所有非空单元格
+  const selected: CanvasCell[] = []
+  for (let y = startGrid.y; y <= endGrid.y; y++) {
+    for (let x = startGrid.x; x <= endGrid.x; x++) {
+      const cell = getCell(x, y)
+      if (cell && cell.type !== 'empty') {
+        selected.push(cell)
+      }
+    }
+  }
+  
+  selectedCells.value = selected
+  
+  // 清除单选
+  selectedCell.value = null
+}
+
+// 完成拖拽移动
+const finishDragMove = () => {
+  if (selectedCells.value.length === 0) return
+  
+  const offsetX = dragCurrentGrid.value.x - dragStartGrid.value.x
+  const offsetY = dragCurrentGrid.value.y - dragStartGrid.value.y
+  
+  // 如果没有移动，不做任何操作
+  if (offsetX === 0 && offsetY === 0) return
+  
+  // 检查目标位置是否有效
+  const canMove = selectedCells.value.every(cell => {
+    const newX = cell.x + offsetX
+    const newY = cell.y + offsetY
+    // 检查是否在画布范围内
+    if (newX < 0 || newX >= actualCols.value || newY < 0 || newY >= actualRows.value) {
+      return false
+    }
+    // 检查目标位置是否为空或是选中区域的一部分
+    const targetCell = getCell(newX, newY)
+    if (!targetCell) return false
+    if (targetCell.type !== 'empty') {
+      // 如果目标位置不为空，检查是否是选中区域的一部分
+      return selectedCells.value.some(c => c.x === newX && c.y === newY)
+    }
+    return true
+  })
+  
+  if (!canMove) {
+    ElMessage.warning('目标位置无效或超出画布范围')
+    return
+  }
+  
+  hasUnsavedChanges.value = true
+  
+  // 保存要移动的单元格数据（深拷贝）
+  const cellsToMove = selectedCells.value.map(cell => ({
+    x: cell.x,
+    y: cell.y,
+    type: cell.type,
+    zoneId: cell.zoneId,
+    shelfConfig: cell.shelfConfig ? { ...cell.shelfConfig } : undefined
+  }))
+  
+  // 先清空原位置
+  cellsToMove.forEach(cellData => {
+    const cell = getCell(cellData.x, cellData.y)
+    if (cell) {
+      cell.type = 'empty'
+      cell.zoneId = undefined
+      cell.shelfConfig = undefined
+    }
+  })
+  
+  // 再填充新位置
+  cellsToMove.forEach(cellData => {
+    const newX = cellData.x + offsetX
+    const newY = cellData.y + offsetY
+    const cell = getCell(newX, newY)
+    if (cell) {
+      cell.type = cellData.type
+      cell.zoneId = cellData.zoneId  // 保持原库区
+      cell.shelfConfig = cellData.shelfConfig
+    }
+  })
+  
+  // 更新选中区域的坐标
+  selectedCells.value = cellsToMove.map(cellData => {
+    const newX = cellData.x + offsetX
+    const newY = cellData.y + offsetY
+    return getCell(newX, newY)!
+  }).filter(Boolean)
+  
+  ElMessage.success('移动成功')
+}
+
+// ==================== 键盘快捷键 ====================
+
+// 复制选中的单元格
+const copySelectedCells = () => {
+  if (selectedCells.value.length === 0) {
+    ElMessage.warning('请先选择要复制的单元格')
+    return
+  }
+  
+  // 深拷贝选中的单元格
+  clipboard.value = selectedCells.value.map(cell => ({
+    x: cell.x,
+    y: cell.y,
+    type: cell.type,
+    zoneId: cell.zoneId,
+    shelfConfig: cell.shelfConfig ? { ...cell.shelfConfig } : undefined
+  }))
+  
+  // 计算选中区域的最小坐标作为基准偏移
+  const minX = Math.min(...selectedCells.value.map(c => c.x))
+  const minY = Math.min(...selectedCells.value.map(c => c.y))
+  clipboardOffset.value = { x: minX, y: minY }
+  
+  isCut.value = false
+  ElMessage.success(`已复制 ${clipboard.value.length} 个单元格`)
+}
+
+// 剪切选中的单元格
+const cutSelectedCells = () => {
+  if (selectedCells.value.length === 0) {
+    ElMessage.warning('请先选择要剪切的单元格')
+    return
+  }
+  
+  // 先复制
+  copySelectedCells()
+  isCut.value = true
+  ElMessage.success(`已剪切 ${clipboard.value.length} 个单元格`)
+}
+
+// 粘贴单元格
+const pasteCells = () => {
+  if (clipboard.value.length === 0) {
+    ElMessage.warning('剪贴板为空')
+    return
+  }
+  
+  if (!pastePreviewPos.value) {
+    ElMessage.warning('请将鼠标移动到目标位置')
+    return
+  }
+  
+  const offsetX = pastePreviewPos.value.x - clipboardOffset.value.x
+  const offsetY = pastePreviewPos.value.y - clipboardOffset.value.y
+  
+  // 检查目标位置是否有效
+  const canPaste = clipboard.value.every(cellData => {
+    const newX = cellData.x + offsetX
+    const newY = cellData.y + offsetY
+    // 检查是否在画布范围内
+    if (newX < 0 || newX >= actualCols.value || newY < 0 || newY >= actualRows.value) {
+      return false
+    }
+    // 检查目标位置是否为空
+    const targetCell = getCell(newX, newY)
+    return targetCell && targetCell.type === 'empty'
+  })
+  
+  if (!canPaste) {
+    ElMessage.warning('目标位置无效或已有内容')
+    return
+  }
+  
+  hasUnsavedChanges.value = true
+  
+  // 如果是剪切操作，先清空原位置
+  if (isCut.value) {
+    clipboard.value.forEach(cellData => {
+      const cell = getCell(cellData.x, cellData.y)
+      if (cell) {
+        cell.type = 'empty'
+        cell.zoneId = undefined
+        cell.shelfConfig = undefined
+      }
+    })
+  }
+  
+  // 粘贴到新位置
+  const newSelectedCells: CanvasCell[] = []
+  clipboard.value.forEach(cellData => {
+    const newX = cellData.x + offsetX
+    const newY = cellData.y + offsetY
+    const cell = getCell(newX, newY)
+    if (cell) {
+      cell.type = cellData.type
+      cell.zoneId = cellData.zoneId  // 保持原库区
+      cell.shelfConfig = cellData.shelfConfig ? { ...cellData.shelfConfig } : undefined
+      newSelectedCells.push(cell)
+    }
+  })
+  
+  // 更新选中区域为粘贴后的单元格
+  selectedCells.value = newSelectedCells
+  
+  // 如果是剪切，清空剪贴板
+  if (isCut.value) {
+    clipboard.value = []
+    isCut.value = false
+  }
+  
+  // 清除粘贴预览
+  pastePreviewPos.value = null
+  
+  ElMessage.success('粘贴成功')
+}
+
+// 删除选中的单元格
+const deleteSelectedCells = () => {
+  if (selectedCells.value.length === 0) return
+  
+  hasUnsavedChanges.value = true
+  
+  selectedCells.value.forEach(cell => {
+    cell.type = 'empty'
+    cell.zoneId = undefined
+    cell.shelfConfig = undefined
+  })
+  
+  ElMessage.success(`已删除 ${selectedCells.value.length} 个单元格`)
+  clearMultiSelection()
+}
+
+// 键盘事件处理
+const handleKeyDown = (e: KeyboardEvent) => {
+  // Ctrl+C: 复制
+  if (e.ctrlKey && e.key === 'c') {
+    e.preventDefault()
+    copySelectedCells()
+    return
+  }
+  
+  // Ctrl+X: 剪切
+  if (e.ctrlKey && e.key === 'x') {
+    e.preventDefault()
+    cutSelectedCells()
+    return
+  }
+  
+  // Ctrl+V: 粘贴
+  if (e.ctrlKey && e.key === 'v') {
+    e.preventDefault()
+    pasteCells()
+    return
+  }
+  
+  // Delete/Backspace: 删除
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    // 只在选择工具模式下响应删除键
+    if (currentTool.value === 'select' && selectedCells.value.length > 0) {
+      e.preventDefault()
+      deleteSelectedCells()
+    }
+    return
+  }
+  
+  // Escape: 取消选择
+  if (e.key === 'Escape') {
+    clearMultiSelection()
+    clipboard.value = []
+    pastePreviewPos.value = null
+    return
+  }
+}
+
 // 获取单元格样式类
 const getCellClass = (cell: CanvasCell) => {
+  const isMultiSelected = selectedCells.value.some(c => c.x === cell.x && c.y === cell.y)
   return {
     'cell-shelf': cell.type === 'shelf',
     'cell-aisle': cell.type === 'aisle',
     'cell-empty': cell.type === 'empty',
-    'cell-selected': selectedCell.value && selectedCell.value.x === cell.x && selectedCell.value.y === cell.y
+    'cell-selected': selectedCell.value && selectedCell.value.x === cell.x && selectedCell.value.y === cell.y,
+    'cell-multi-selected': isMultiSelected
   }
 }
 
@@ -924,7 +1461,7 @@ const estimatedLocations = computed(() => {
     : cells.value.filter(c => c.zoneId === currentZoneId.value)
   return targetCells
     .filter(c => c.type === 'shelf' && c.shelfConfig)
-    .reduce((sum, c) => sum + (c.shelfConfig!.rows * c.shelfConfig!.columns), 0)
+    .reduce((sum, c) => sum + (c.shelfConfig!.rows * c.shelfConfig!.columns * (c.shelfConfig!.layers || 1)), 0)
 })
 
 // 添加库区
@@ -1257,11 +1794,15 @@ onMounted(async () => {
   
   // 添加浏览器关闭/刷新提示
   window.addEventListener('beforeunload', handleBeforeUnload)
+  
+  // 添加键盘事件监听
+  window.addEventListener('keydown', handleKeyDown)
 })
 
 // 清理
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
+  window.removeEventListener('keydown', handleKeyDown)
 })
 
 // 浏览器关闭/刷新时的提示
@@ -1627,6 +2168,7 @@ onBeforeRouteLeave(async (to, from, next) => {
   padding: 2px;
   border-radius: 4px;
   user-select: none;
+  position: relative;  // 用于定位框选矩形和预览单元格
 }
 
 .grid-cell {
@@ -1639,6 +2181,7 @@ onBeforeRouteLeave(async (to, from, next) => {
   align-items: center;
   justify-content: center;
   transition: all 0.15s;
+  position: relative;  // 用于定位多选高亮伪元素
   
   &:hover {
     transform: scale(1.05);
@@ -1665,10 +2208,53 @@ onBeforeRouteLeave(async (to, from, next) => {
     z-index: 10;
   }
   
+  &.cell-multi-selected {
+    outline: 2px solid #67c23a;
+    outline-offset: -1px;
+    z-index: 5;
+    
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(103, 194, 58, 0.2);
+      pointer-events: none;
+    }
+  }
+  
   .cell-label {
     font-size: 10px;
     font-weight: bold;
   }
+}
+
+// 框选矩形
+.selection-box {
+  position: absolute;
+  background: rgba(64, 158, 255, 0.2);
+  border: 2px dashed #409eff;
+  pointer-events: none;
+  z-index: 100;
+}
+
+// 拖拽预览单元格
+.drag-preview-cell {
+  position: absolute;
+  border-radius: 2px;
+  opacity: 0.5;
+  pointer-events: none;
+  z-index: 50;
+  border: 2px dashed #67c23a;
+}
+
+// 粘贴预览单元格
+.paste-preview-cell {
+  position: absolute;
+  border-radius: 2px;
+  opacity: 0.4;
+  pointer-events: none;
+  z-index: 50;
+  border: 2px dashed #e6a23c;
 }
 
 .selected-info {
